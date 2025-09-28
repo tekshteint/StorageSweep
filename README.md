@@ -44,29 +44,7 @@ DEST_TWO=D:\PATH\TO\CAMERA2
 - `HA_TOKEN`: Long-Lived Access Token from Home Assistant.
 - The rest are paths to where your IP camera storage is and will be.
 
-### 2. Review configuration
-Edit the top of `StorageSweep.ps1` to confirm your folder paths:
-
-```powershell
-$Paths = @{
-  EFrontSrc = 'E:\FTP\Camera1'
-  EBackSrc  = 'E:\FTP\Camera2'
-  DFrontDst = 'D:\Camera1'
-  DBackDst  = 'D:\Camera2'
-  DRoot     = 'D:\'
-  ERoot     = 'E:\'
-  FRoot     = 'F:\'
-  CLogRoot  = 'C:\inetpub\logs\LogFiles\FTPSVC2'
-}
-```
-
-Check `$HA.NotifySvc` matches your HA service, e.g.:
-
-```powershell
-NotifySvc   = 'notify.mobile_app_tomphone'
-```
-
-### 3. Test manually
+### 2. Test manually
 Open PowerShell as Administrator and run:
 
 ```powershell
