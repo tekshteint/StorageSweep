@@ -132,26 +132,6 @@ function Wipe-TargetDir {
   }
 }
 
-function Move-DirContents {
-  param(
-    [Parameter(Mandatory)][string]$SourceDir,
-    [Parameter(Mandatory)][string]$DestDir
-  )
-  if (!(Test-Path $SourceDir)) { Write-Log "INFO: Source missing, skipping: $SourceDir"; return $false }
-  Ensure-Dir $DestDir
-  $items = Get-ChildItem -LiteralPath $SourceDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }
-  if (-not $items) { return $false }
-  # oldest-first move
-  $items = $items | Sort-Object LastWriteTime
-  foreach ($it in $items) {
-    if ($DryRun) { Write-Log "[DryRun] Move '$($it.FullName)' -> '$DestDir'" }
-    else {
-      try { Move-Item -LiteralPath $it.FullName -Destination $DestDir -Force -ErrorAction Stop; Write-Log "Moved: '$($it.FullName)' -> '$DestDir'" }
-      catch { Write-Log "ERROR: Move '$($it.FullName)' -> '$DestDir' failed. $_" }
-    }
-  }
-  return $true
-}
 
 function Move-IntoDriveUntilCap {
   param(
