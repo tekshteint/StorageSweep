@@ -1,5 +1,3 @@
-<# StorageSweep.ps1 —#>
-
 #------------------------------ Config ------------------------------
 
 function Write-Log {
@@ -11,38 +9,27 @@ function Write-Log {
   Add-Content -Path $LogFile -Value $line
 }
 
-#log rotation
+# Log rotation
 $LogDir  = 'C:\Logs'
 if (!(Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
-
-#log file timestamps
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $LogFile   = Join-Path $LogDir "StorageMaintenance_$timestamp.log"
-
-# 5 most recent logs
 $logs = Get-ChildItem -Path $LogDir -Filter "StorageMaintenance_*.log" | Sort-Object LastWriteTime -Descending
-if ($logs.Count -gt 5) {
-    $logs | Select-Object -Skip 5 | Remove-Item -Force
-}
+if ($logs.Count -gt 5) { $logs | Select-Object -Skip 5 | Remove-Item -Force }
 
 function Load-DotEnv {
-    param([string]$Path = ".env")
-
-    if (!(Test-Path $Path)) {
-        Write-Log "WARNING: .env file not found at $Path"
-        return @{}
-    }
-
-    $vars = @{}
-    foreach ($line in Get-Content $Path) {
-        if ($line -match '^\s*#') { continue }       # skip comments
-        if (-not $line.Contains('=')) { continue }   # skip malformed
-        $parts = $line.Split('=', 2)
-        $name  = $parts[0].Trim()
-        $value = $parts[1].Trim()
-        $vars[$name] = $value
-    }
-    return $vars
+  param([string]$Path = ".env")
+  if (!(Test-Path $Path)) { Write-Log "WARNING: .env file not found at $Path"; return @{} }
+  $vars = @{}
+  foreach ($line in Get-Content $Path) {
+    if ($line -match '^\s*#') { continue }
+    if (-not $line.Contains('=')) { continue }
+    $parts = $line.Split('=', 2)
+    $name  = $parts[0].Trim()
+    $value = $parts[1].Trim()
+    $vars[$name] = $value
+  }
+  return $vars
 }
 
 $envVars = Load-DotEnv -Path (Join-Path $PSScriptRoot '.env')
@@ -50,39 +37,32 @@ foreach ($k in 'HA_URL','HA_TOKEN','CAM_ONE','CAM_TWO','DEST_ONE','DEST_TWO') {
   if (-not $envVars[$k]) { Write-Log "ERROR: .env missing $k"; exit 1 }
 }
 
-
 $Paths = @{
-  EFrontSrc = $envVars['CAM_ONE']
-  EBackSrc  = $envVars['CAM_TWO']
-  DFrontDst = $envVars['DEST_ONE']
-  DBackDst  = $envVars['DEST_TWO']
+  EFrontSrc = $envVars['CAM_ONE']   
+  EBackSrc  = $envVars['CAM_TWO']   
+  DFrontDst = $envVars['DEST_ONE']  
+  DBackDst  = $envVars['DEST_TWO']  
   DRoot     = 'D:\'
   ERoot     = 'E:\'
   FRoot     = 'F:\'
-  CLogRoot  = 'C:\inetpub\logs\LogFiles\FTPSVC2'  
+  CLogRoot  = 'C:\inetpub\logs\LogFiles\FTPSVC2'
 }
 $IgnoreName = 'DVRWorkDirectory'
 
-
-
-
-# safety
+# Safety
 $DryRun = $true
 $AbortIfNotAdmin = $true
-
-
 
 # Home Assistant notify
 $HA = @{
   Enabled     = $true
   BaseUrl     = $envVars['HA_URL']
   Token       = $envVars['HA_TOKEN']
-  NotifySvc   = 'notify.mobile_app_tomgalaxy'     
+  NotifySvc   = 'notify.mobile_app_tomgalaxy'
   Title       = 'PC storage maintenance'
 }
 
 #---------------------------- Functions ----------------------------
-
 
 function Assert-Admin {
   if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
@@ -103,27 +83,46 @@ function Get-FreePercent {
 
 function Ensure-Dir { param([string]$Path) if (!(Test-Path $Path)) { if ($DryRun){Write-Log "[DryRun] Create directory $Path"} else {New-Item -ItemType Directory -Path $Path -Force | Out-Null} } }
 
-function Move-ItemsIgnoringName {
-  param([Parameter(Mandatory)][string]$Source,[Parameter(Mandatory)][string]$Destination,[string]$Ignore = $IgnoreName)
-  if (!(Test-Path $Source)) { Write-Log "INFO: Source missing, skipping: $Source"; return }
-  Ensure-Dir $Destination
-  $items = Get-ChildItem -LiteralPath $Source -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $Ignore }
-  foreach ($it in $items) {
-    if ($DryRun) { Write-Log "[DryRun] Move '$($it.FullName)' -> '$Destination'" }
-    else {
-      try { Move-Item -LiteralPath $it.FullName -Destination $Destination -Force -ErrorAction Stop; Write-Log "Moved: '$($it.FullName)' -> '$Destination'" }
-      catch { Write-Log "ERROR: Move '$($it.FullName)' -> '$Destination' failed. $_" }
-    }
+function Send-HA-Notification {
+  param([Parameter(Mandatory)][string]$Title,[Parameter(Mandatory)][string]$Message)
+  Write-Log "Entering Send-HA-Notification (DryRun=$DryRun, Enabled=$($HA.Enabled))"
+  if (-not $HA.Enabled) { Write-Log "HA disabled, skipping notification."; return }
+  if ([string]::IsNullOrWhiteSpace($HA.Token) -or [string]::IsNullOrWhiteSpace($HA.BaseUrl) -or [string]::IsNullOrWhiteSpace($HA.NotifySvc)) {
+    Write-Log "WARNING: HA notify enabled but BaseUrl, Token, or NotifySvc is not set."; return
   }
+  $svcPath = $HA.NotifySvc -replace '^\s*notify\.', 'notify/'
+  $url = "$($HA.BaseUrl.TrimEnd('/'))/api/services/$svcPath"
+  $headers = @{ Authorization = "Bearer $($HA.Token)" }
+  $body = @{ title = $Title; message = $Message } | ConvertTo-Json
+  try {
+    if ($DryRun) { Write-Log "[DryRun] (Notification still sent) HA notify POST $url body=$body" } else { Write-Log "HA notify POST $url body=$body" }
+    Invoke-RestMethod -Method Post -Uri $url -Headers $headers -Body $body -ContentType 'application/json' | Out-Null
+    Write-Log "Sent HA notification."
+  } catch { Write-Log "ERROR: HA notification failed. $_" }
 }
 
-function Clear-DriveRoot {
-  param([Parameter(Mandatory)][char]$Drive)
-  $systemDrive = [System.IO.Path]::GetPathRoot($env:SystemRoot).TrimEnd('\').TrimEnd(':')
-  if ($Drive.ToString().ToUpper() -eq $systemDrive.ToUpper()) { throw "Refusing to wipe the system drive $Drive`:" }
-  $root = "$Drive`:\"
-  if (!(Test-Path $root)) { throw "Drive $Drive`: not found" }
-  $items = Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue
+function Purge-LogFiles {
+  param([Parameter(Mandatory)][string]$Root,[string]$Filter = '*.log')
+  if (!(Test-Path $Root)) { Write-Log "INFO: Log path not found, skipping: $Root"; return }
+  $files = Get-ChildItem -LiteralPath $Root -Filter $Filter -File -Recurse -Force -ErrorAction SilentlyContinue
+  if (-not $files) { Write-Log "INFO: No log files matched at $Root"; return }
+  $count = 0; $bytes = 0
+  foreach ($f in $files) {
+    $bytes += $f.Length
+    if ($DryRun) { Write-Log "[DryRun] Delete $($f.FullName)" }
+    else {
+      try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $count++ }
+      catch { Write-Log "ERROR: Delete failed for $($f.FullName). $_" }
+    }
+  }
+  if ($DryRun) { Write-Log "[DryRun] Would delete $($files.Count) files, size $([math]::Round($bytes/1MB,2)) MB from $Root" }
+  else { Write-Log "Deleted $count files, freed approx $([math]::Round($bytes/1MB,2)) MB from $Root" }
+}
+
+function Wipe-TargetDir {
+  param([Parameter(Mandatory)][string]$TargetDir)
+  if (!(Test-Path $TargetDir)) { Write-Log "INFO: Target dir missing, nothing to wipe: $TargetDir"; return }
+  $items = Get-ChildItem -LiteralPath $TargetDir -Force -ErrorAction SilentlyContinue
   foreach ($it in $items) {
     if ($DryRun) { Write-Log "[DryRun] Remove '$($it.FullName)'" }
     else {
@@ -133,66 +132,59 @@ function Clear-DriveRoot {
   }
 }
 
-function Move-AllFromTo {
-  param([Parameter(Mandatory)][string]$FromRoot,[Parameter(Mandatory)][string]$ToRoot,[switch]$CreateSubdirWithTimestamp)
-  if (!(Test-Path $FromRoot)) { throw "Source root not found: $FromRoot" }
-  if (!(Test-Path $ToRoot))   { throw "Destination root not found: $ToRoot" }
-  $dest = if ($CreateSubdirWithTimestamp){ $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'; $d = Join-Path $ToRoot ("_Migrated_" + $stamp); Ensure-Dir $d; $d } else { $ToRoot }
-  $items = Get-ChildItem -LiteralPath $FromRoot -Force -ErrorAction SilentlyContinue
+function Move-DirContents {
+  param(
+    [Parameter(Mandatory)][string]$SourceDir,
+    [Parameter(Mandatory)][string]$DestDir
+  )
+  if (!(Test-Path $SourceDir)) { Write-Log "INFO: Source missing, skipping: $SourceDir"; return $false }
+  Ensure-Dir $DestDir
+  $items = Get-ChildItem -LiteralPath $SourceDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }
+  if (-not $items) { return $false }
+  # oldest-first move
+  $items = $items | Sort-Object LastWriteTime
   foreach ($it in $items) {
-    if ($CreateSubdirWithTimestamp -and ($it.FullName -eq $dest)) { continue }
-    if ($DryRun) { Write-Log "[DryRun] Move '$($it.FullName)' -> '$dest'" }
+    if ($DryRun) { Write-Log "[DryRun] Move '$($it.FullName)' -> '$DestDir'" }
     else {
-      try { Move-Item -LiteralPath $it.FullName -Destination $dest -Force -ErrorAction Stop; Write-Log "Moved: '$($it.FullName)' -> '$dest'" }
-      catch { Write-Log "ERROR: Move '$($it.FullName)' -> '$dest' failed. $_" }
+      try { Move-Item -LiteralPath $it.FullName -Destination $DestDir -Force -ErrorAction Stop; Write-Log "Moved: '$($it.FullName)' -> '$DestDir'" }
+      catch { Write-Log "ERROR: Move '$($it.FullName)' -> '$DestDir' failed. $_" }
     }
   }
+  return $true
 }
 
-function Send-HA-Notification {
-  param([Parameter(Mandatory)][string]$Title,[Parameter(Mandatory)][string]$Message)
-  Write-Log "Entering Send-HA-Notification (DryRun=$DryRun, Enabled=$($HA.Enabled))" 
-  if (-not $HA.Enabled) { Write-Log "HA disabled, skipping notification."; return }
-  if ([string]::IsNullOrWhiteSpace($HA.Token) -or [string]::IsNullOrWhiteSpace($HA.BaseUrl) -or [string]::IsNullOrWhiteSpace($HA.NotifySvc)) {
-    Write-Log "WARNING: HA notify enabled but BaseUrl, Token, or NotifySvc is not set."; return
-  }
-
-  # convert notify.mobile_app_xxx -> notify/mobile_app_xxx
-  $svcPath = $HA.NotifySvc -replace '^\s*notify\.', 'notify/'
-  $url = "$($HA.BaseUrl.TrimEnd('/'))/api/services/$svcPath"
-  $headers = @{ Authorization = "Bearer $($HA.Token)" }
-  $body = @{ title = $Title; message = $Message } | ConvertTo-Json
-
-  try {
-    if ($DryRun) { Write-Log "[DryRun] (Notification still sent) HA notify POST $url body=$body" }
-    else { Write-Log "HA notify POST $url body=$body" }
-
-    # always send even in DryRun
-    Invoke-RestMethod -Method Post -Uri $url -Headers $headers -Body $body -ContentType 'application/json' | Out-Null
-    Write-Log "Sent HA notification."
-  } catch {
-    Write-Log "ERROR: HA notification failed. $_"
-  }
-}
-
-
-# purge files helper
-function Purge-LogFiles {
-  param([Parameter(Mandatory)][string]$Root,[string]$Filter = '*.log')
-  if (!(Test-Path $Root)) { Write-Log "INFO: Log path not found, skipping: $Root"; return }
-  $files = Get-ChildItem -LiteralPath $Root -Filter $Filter -File -Recurse -Force -ErrorAction SilentlyContinue
-  if (-not $files) { Write-Log "INFO: No log files matched at $Root"; return }
-  $count = 0; $bytes = 0
-  foreach ($f in $files) {
-    $bytes += ($f.Length)
-    if ($DryRun) { Write-Log "[DryRun] Delete $($f.FullName)" }
-    else {
-      try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $count++ }
-      catch { Write-Log "ERROR: Delete failed for $($f.FullName). $_" }
+function Move-IntoDriveUntilCap {
+  param(
+    [Parameter(Mandatory)][string]$SourceDir,
+    [Parameter(Mandatory)][string]$DestDir,
+    [Parameter(Mandatory)][char]$DestDrive,
+    [int]$CapUsedPercent = 90   # stop when dest drive reaches this used %
+  )
+  # loop in small batches: move a few items each pass, re-check capacity
+  $movedAny = $false
+  while ($true) {
+    $free = Get-FreePercent $DestDrive
+    $used = 100 - $free
+    if ($used -ge $CapUsedPercent) {
+      Write-Log "Dest $DestDrive`: is at/over $CapUsedPercent% used (free=$free%). Stop moving into $DestDir."
+      break
     }
+    if (!(Test-Path $SourceDir)) { Write-Log "Source empty/missing: $SourceDir"; break }
+    # move a small batch each loop to stay responsive
+    $batch = Get-ChildItem -LiteralPath $SourceDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName } | Sort-Object LastWriteTime | Select-Object -First 50
+    if (-not $batch -or $batch.Count -eq 0) { Write-Log "No more items in $SourceDir"; break }
+    Ensure-Dir $DestDir
+    foreach ($it in $batch) {
+      if ($DryRun) { Write-Log "[DryRun] Move '$($it.FullName)' -> '$DestDir'" }
+      else {
+        try { Move-Item -LiteralPath $it.FullName -Destination $DestDir -Force -ErrorAction Stop; Write-Log "Moved: '$($it.FullName)' -> '$DestDir'" }
+        catch { Write-Log "ERROR: Move '$($it.FullName)' -> '$DestDir' failed. $_" }
+      }
+      $movedAny = $true
+    }
+    # loop to re-check capacity
   }
-  if ($DryRun) { Write-Log "[DryRun] Would delete $($files.Count) files, size $([math]::Round($bytes/1MB,2)) MB from $Root" }
-  else { Write-Log "Deleted $count files, freed approx $([math]::Round($bytes/1MB,2)) MB from $Root" }
+  return $movedAny
 }
 
 #---------------------------- Main Logic ----------------------------
@@ -207,39 +199,98 @@ if ($freeC -lt 10) {
   Purge-LogFiles -Root $Paths.CLogRoot -Filter '*.log'
 }
 
-# E: logic
-$freeE = Get-FreePercent 'E'
-Write-Log "E: free = $freeE%"
+# Assess E/F/D
+$freeE = Get-FreePercent 'E'; $usedE = 100 - $freeE
+$freeF = Get-FreePercent 'F'; $usedF = 100 - $freeF
+$freeD = Get-FreePercent 'D'; $usedD = 100 - $freeD
+Write-Log "E: free=$freeE% (used=$usedE%), F: free=$freeF% (used=$usedF%), D: free=$freeD% (used=$usedD%)"
 
-if ($freeE -lt 10) {
-  Write-Log "Condition 2a met. E: free < 10%."
-  Send-HA-Notification -Title $HA.Title -Message "E: free space is $freeE%. Starting folder moves to D:"
+# Trigger only when E is at/over 90% used
+if ($usedE -ge 90) {
+  Send-HA-Notification -Title $HA.Title -Message "E >= 90% used (E used=$usedE%). Starting balancing across F and D."
 
-  Move-ItemsIgnoringName -Source $Paths.EFrontSrc -Destination $Paths.DFrontDst -Ignore $IgnoreName
-  Move-ItemsIgnoringName -Source $Paths.EBackSrc  -Destination $Paths.DBackDst  -Ignore $IgnoreName
+  # Build F destinations with same leaf names as E sources
+  $FFrontDst = Join-Path $Paths.FRoot (Split-Path $Paths.EFrontSrc -Leaf)
+  $FBackDst  = Join-Path $Paths.FRoot (Split-Path $Paths.EBackSrc  -Leaf)
 
-  $freeD = Get-FreePercent 'D'
-  Write-Log "D: free after E->D moves = $freeD%"
-  if ($freeD -lt 10) {
-    Write-Log "D: free < 10%. Attempting D: -> F: migration."
-    try {
-      Move-AllFromTo -FromRoot $Paths.DRoot -ToRoot $Paths.FRoot -CreateSubdirWithTimestamp
-      Write-Log "D: -> F: migration attempted."
-    } catch {
-      Write-Log "D: -> F: migration failed. $_"
-      Write-Log "Wiping D:, then moving E: contents into D:."
-      try { Clear-DriveRoot -Drive 'D' } catch { Write-Log "ERROR wiping D:: $_" }
-      try { Move-AllFromTo -FromRoot $Paths.ERoot -ToRoot $Paths.DRoot; Write-Log "Moved all contents of E: -> D:" }
-      catch { Write-Log "ERROR moving E: -> D: $_" }
+  if ($usedF -lt 90) {
+    Write-Log "F < 90% used. Moving from E -> F until F reaches 90%, then spill to D."
+
+    # E -> F (until F hits 90%)
+    $m1 = Move-IntoDriveUntilCap -SourceDir $Paths.EFrontSrc -DestDir $FFrontDst -DestDrive 'F' -CapUsedPercent 90
+    $m2 = Move-IntoDriveUntilCap -SourceDir $Paths.EBackSrc  -DestDir $FBackDst  -DestDrive 'F' -CapUsedPercent 90
+
+    # Re-evaluate E remaining; spill to D if any left
+    $remainingFront = Test-Path $Paths.EFrontSrc -and (Get-ChildItem -LiteralPath $Paths.EFrontSrc -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }).Count -gt 0
+    $remainingBack  = Test-Path $Paths.EBackSrc  -and (Get-ChildItem -LiteralPath $Paths.EBackSrc  -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }).Count -gt 0
+
+    if ($remainingFront -or $remainingBack) {
+      Write-Log "Spillover from E -> D (stop if D hits 90% used; wipe D targets and continue if needed)."
+
+      # Loop: move from E to D until E empties; if D hits 90%, wipe D target dirs and continue
+      while ($true) {
+        $freeD = Get-FreePercent 'D'; $usedD = 100 - $freeD
+        if ($usedD -ge 90) {
+          Write-Log "D reached 90% used. Wiping only D targets, then continuing."
+          Wipe-TargetDir -TargetDir $Paths.DFrontDst
+          Wipe-TargetDir -TargetDir $Paths.DBackDst
+          # Continue loop, capacity will be freed
+        }
+
+        $movedFront = Move-IntoDriveUntilCap -SourceDir $Paths.EFrontSrc -DestDir $Paths.DFrontDst -DestDrive 'D' -CapUsedPercent 90
+        $movedBack  = Move-IntoDriveUntilCap -SourceDir $Paths.EBackSrc  -DestDir $Paths.DBackDst  -DestDrive 'D' -CapUsedPercent 90
+
+        $remainingFront = Test-Path $Paths.EFrontSrc -and (Get-ChildItem -LiteralPath $Paths.EFrontSrc -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }).Count -gt 0
+        $remainingBack  = Test-Path $Paths.EBackSrc  -and (Get-ChildItem -LiteralPath $Paths.EBackSrc  -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }).Count -gt 0
+
+        if (-not ($remainingFront -or $remainingBack)) { break }
+        # If still remaining but D not freed enough by previous wipe, the loop continues
+      }
     }
+
   } else {
-    Write-Log "D: has sufficient free space, no cascade action required."
+    Write-Log "F >= 90% used. Move F -> D (two dirs), wiping D targets if/when D hits 90%, then move E -> D similarly."
+
+    # Step 1: F -> D (only two dirs)
+    while ($true) {
+      $freeD = Get-FreePercent 'D'; $usedD = 100 - $freeD
+      if ($usedD -ge 90) {
+        Write-Log "D reached 90% used. Wiping only D targets before continuing F -> D."
+        Wipe-TargetDir -TargetDir $Paths.DFrontDst
+        Wipe-TargetDir -TargetDir $Paths.DBackDst
+      }
+
+      $movedF1 = Move-IntoDriveUntilCap -SourceDir $FFrontDst -DestDir $Paths.DFrontDst -DestDrive 'D' -CapUsedPercent 90
+      $movedF2 = Move-IntoDriveUntilCap -SourceDir $FBackDst  -DestDir $Paths.DBackDst  -DestDrive 'D' -CapUsedPercent 90
+
+      $remainingF1 = Test-Path $FFrontDst -and (Get-ChildItem -LiteralPath $FFrontDst -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }).Count -gt 0
+      $remainingF2 = Test-Path $FBackDst  -and (Get-ChildItem -LiteralPath $FBackDst  -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }).Count -gt 0
+
+      if (-not ($remainingF1 -or $remainingF2)) { break }
+    }
+
+    # Step 2: E -> D (two dirs), with same D-wipe-on-90% behavior
+    while ($true) {
+      $freeD = Get-FreePercent 'D'; $usedD = 100 - $freeD
+      if ($usedD -ge 90) {
+        Write-Log "D reached 90% used. Wiping only D targets before continuing E -> D."
+        Wipe-TargetDir -TargetDir $Paths.DFrontDst
+        Wipe-TargetDir -TargetDir $Paths.DBackDst
+      }
+
+      $movedE1 = Move-IntoDriveUntilCap -SourceDir $Paths.EFrontSrc -DestDir $Paths.DFrontDst -DestDrive 'D' -CapUsedPercent 90
+      $movedE2 = Move-IntoDriveUntilCap -SourceDir $Paths.EBackSrc  -DestDir $Paths.DBackDst  -DestDrive 'D' -CapUsedPercent 90
+
+      $remainingE1 = Test-Path $Paths.EFrontSrc -and (Get-ChildItem -LiteralPath $Paths.EFrontSrc -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }).Count -gt 0
+      $remainingE2 = Test-Path $Paths.EBackSrc  -and (Get-ChildItem -LiteralPath $Paths.EBackSrc  -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }).Count -gt 0
+
+      if (-not ($remainingE1 -or $remainingE2)) { break }
+    }
   }
 } else {
-  Write-Log "E: free >= 10%. No action."
+  Write-Log "E < 90% used. No balancing required."
   if ($DryRun) {
-    Write-Log "DryRun = $DryRun sending HA notification anyways..."
-    Send-HA-Notification -Title "Storage Dry Run" -Message "E: free space is $freeE%."
+    Send-HA-Notification -Title "Storage Dry Run" -Message "No action. E used=$usedE%, F used=$usedF%, D used=$usedD%."
   }
 }
 
