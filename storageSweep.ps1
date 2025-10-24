@@ -65,7 +65,43 @@ $HA = @{
 
 #---------------------------- Functions ----------------------------
 
-$MinAgeSeconds = 60
+$MinAgeSeconds = 600
+
+# Accept folder names like 2025-10-24, 20251024, 2025_10_24, 2025.10.24
+function Get-FolderDateFromName {
+  param([Parameter(Mandatory)][string]$Name)
+  $patterns = @(
+    '^(?<y>\d{4})[-_\.]?(?<m>\d{2})[-_\.]?(?<d>\d{2})$'  # 2025-10-24 / 20251024 / 2025_10_24 / 2025.10.24
+  )
+  foreach ($p in $patterns) {
+    $m = [regex]::Match($Name, $p)
+    if ($m.Success) {
+      try {
+        return [datetime]::new([int]$m.Groups['y'].Value, [int]$m.Groups['m'].Value, [int]$m.Groups['d'].Value)
+      } catch {
+        # fall through
+      }
+    }
+  }
+  return $null
+}
+
+function Should-SkipByDate {
+  param([Parameter(Mandatory)][System.IO.FileSystemInfo]$Item)
+  if (-not $Item.PSIsContainer) { return $false }
+
+  $folderDate = Get-FolderDateFromName -Name $Item.Name
+  if ($null -eq $folderDate) { return $false }
+
+  $today    = (Get-Date).Date
+  $tomorrow = $today.AddDays(1)
+
+  if ($folderDate.Date -eq $today -or $folderDate.Date -eq $tomorrow) {
+    return $true
+  }
+
+  return $false
+}
 
 function Test-InUse {
   param([Parameter(Mandatory)][string]$Path)
@@ -205,31 +241,28 @@ function Move-IntoDriveUntilCap {
              Where-Object { $_.Name -ne $IgnoreName } |
              Sort-Object LastWriteTime |
              Select-Object -First 50
-    if (-not $batch -or $batch.Count -eq 0) { Write-Log "No more items in $SourceDir"; break }
+    if (-not $batch -or $batch.Count -le 1) { Write-Log "No more items in $SourceDir"; break }
 
     Ensure-Dir $DestDir
 
-    foreach ($it in $batch) {
+        foreach ($it in $batch) {
+
+      # Skip date-named dirs for today or tomorrow
+      if ($it.PSIsContainer -and (Should-SkipByDate -Item $it)) {
+        Write-Log "SKIP (today/tomorrow dir): '$($it.FullName)'"
+        continue
+      }
+
+      # Skip items still being written or locked
+      if (-not (Test-ItemReady -Item $it)) {
+        Write-Log "SKIP (busy/new): '$($it.FullName)' (LastWrite=$($it.LastWriteTime))"
+        continue
+      }
+
       if ($DryRun) {
         if ($it.PSIsContainer) {
           $destRoot = Join-Path $DestDir $it.Name
-          try {
-            $files = Get-ChildItem -LiteralPath $it.FullName -File -Recurse -Force -ErrorAction Stop
-          } catch {
-            Write-Log "[DryRun] ERROR: Failed to enumerate files in '$($it.FullName)'. $_"
-            $files = @()
-          }
-          $totalFiles = $files.Count
-          $extList = ($files |
-            Select-Object -ExpandProperty Extension |
-            ForEach-Object { if ([string]::IsNullOrWhiteSpace($_)) { '(no ext)' } else { $_.ToLowerInvariant() } } |
-            Sort-Object -Unique) -join ', '
-          if ([string]::IsNullOrWhiteSpace($extList)) { $extList = '(none)' }
-
           Write-Log "[DryRun] Dir -> '$($it.FullName)'  ==> DestRoot '$destRoot'"
-          Write-Log "[DryRun]   File types: $extList"
-          Write-Log "[DryRun]   Total files (recursive): $totalFiles"
-          if ($totalFiles -eq 0) { Write-Log "[DryRun]   (Empty directory will be moved as folder only)" }
         } else {
           $destPath = Join-Path $DestDir $it.Name
           Write-Log "[DryRun] File -> '$($it.FullName)'  ==> '$destPath'"
@@ -239,11 +272,19 @@ function Move-IntoDriveUntilCap {
           Move-Item -LiteralPath $it.FullName -Destination $DestDir -Force -ErrorAction Stop
           Write-Log "Moved: '$($it.FullName)' -> '$DestDir'"
         } catch {
-          Write-Log "ERROR: Move '$($it.FullName)' -> '$DestDir' failed. $_"
+          $msg = $_.Exception.Message
+          if ($msg -match 'being used by another process' -or $_.Exception -is [System.IO.IOException]) {
+            Write-Log "SKIP (in use): '$($it.FullName)' - $msg"
+          } else {
+            Write-Log "ERROR: Move '$($it.FullName)' -> '$DestDir' failed. $msg"
+          }
+          continue
         }
       }
+
       $movedAny = $true
     }
+
 
     # IMPORTANT: in DryRun nothing changes on disk, so bail after one batch to avoid infinite loops.
     if ($DryRun) {
