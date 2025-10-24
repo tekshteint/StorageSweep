@@ -51,7 +51,7 @@ $Paths = @{
 $IgnoreName = 'DVRWorkDirectory'
 
 # Safety
-$DryRun = $true
+$DryRun = $false
 $AbortIfNotAdmin = $true
 
 # Home Assistant notify
@@ -262,10 +262,10 @@ function Move-IntoDriveUntilCap {
       }
 
       # Skip items still being written or very new/locked
-      if (-not (Test-ItemReady -Item $it)) {
-        Write-Log "SKIP (busy/new): '$($it.FullName)' (LastWrite=$($it.LastWriteTime))"
-        continue
-      }
+      #if (-not (Test-ItemReady -Item $it)) {
+      #  Write-Log "SKIP (busy/new): '$($it.FullName)' (LastWrite=$($it.LastWriteTime))"
+      #  continue
+      #}
 
       if ($DryRun) {
         if ($it.PSIsContainer) {
