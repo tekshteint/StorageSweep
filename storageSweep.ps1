@@ -82,7 +82,7 @@ function Test-InUse {
     $fs.Close()
     return $false
   } catch {
-    return $true  # couldn't open exclusively => likely in use
+    return $true
   }
 }
 
@@ -92,12 +92,11 @@ function Test-ItemReady {
   $ageSec = [int]((Get-Date) - $Item.LastWriteTime).TotalSeconds
   if ($ageSec -lt $MinAgeSeconds) { return $false }
 
-  # 2) lock gate
+  # 2) lock gate for files
   if (-not $Item.PSIsContainer) {
     return -not (Test-InUse -Path $Item.FullName)
   }
 
-  # For directories: skip if any child file is "too new"
   $recentChild = Get-ChildItem -LiteralPath $Item.FullName -File -Recurse -Force -ErrorAction SilentlyContinue |
                  Where-Object { ((Get-Date) - $_.LastWriteTime).TotalSeconds -lt $MinAgeSeconds } |
                  Select-Object -First 1
@@ -105,6 +104,14 @@ function Test-ItemReady {
 
   return $true
 }
+function Test-HasContent {
+  param([Parameter(Mandatory)][string]$Path)
+  if (-not (Test-Path -LiteralPath $Path)) { return $false }
+  $items = Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue |
+           Where-Object { $_.Name -ne $IgnoreName }
+  return ($items.Count -gt 0)
+}
+
 
 function Assert-Admin {
   if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
