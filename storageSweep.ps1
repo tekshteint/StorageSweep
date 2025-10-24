@@ -51,7 +51,7 @@ $Paths = @{
 $IgnoreName = 'DVRWorkDirectory'
 
 # Safety
-$DryRun = $true
+$DryRun = $false
 $AbortIfNotAdmin = $true
 
 # Home Assistant notify
@@ -64,6 +64,47 @@ $HA = @{
 }
 
 #---------------------------- Functions ----------------------------
+
+$MinAgeSeconds = 60
+
+function Test-InUse {
+  param([Parameter(Mandatory)][string]$Path)
+  try {
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer) { return $false }  
+    $fs = [System.IO.FileStream]::new(
+      $item.FullName,
+      [System.IO.FileMode]::Open,
+      [System.IO.FileAccess]::ReadWrite,
+      [System.IO.FileShare]::None
+    )
+    $fs.Close()
+    return $false
+  } catch {
+    return $true  # couldn't open exclusively => likely in use
+  }
+}
+
+function Test-ItemReady {
+  param([Parameter(Mandatory)][System.IO.FileSystemInfo]$Item)
+  # 1) age gate
+  $ageSec = [int]((Get-Date) - $Item.LastWriteTime).TotalSeconds
+  if ($ageSec -lt $MinAgeSeconds) { return $false }
+
+  # 2) lock gate
+  if (-not $Item.PSIsContainer) {
+    return -not (Test-InUse -Path $Item.FullName)
+  }
+
+  # For directories: skip if any child file is "too new"
+  $recentChild = Get-ChildItem -LiteralPath $Item.FullName -File -Recurse -Force -ErrorAction SilentlyContinue |
+                 Where-Object { ((Get-Date) - $_.LastWriteTime).TotalSeconds -lt $MinAgeSeconds } |
+                 Select-Object -First 1
+  if ($recentChild) { return $false }
+
+  return $true
+}
 
 function Assert-Admin {
   if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
