@@ -5,7 +5,8 @@ function Write-Log {
   if (!(Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
   $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
   $line = "[$stamp] $Message"
-  Write-Host $line
+  Write-Host $line 
+  #if ($verbose) { Write-Host $line }
   Add-Content -Path $LogFile -Value $line
 }
 
@@ -138,11 +139,12 @@ function Move-IntoDriveUntilCap {
     [Parameter(Mandatory)][string]$SourceDir,
     [Parameter(Mandatory)][string]$DestDir,
     [Parameter(Mandatory)][char]$DestDrive,
-    [int]$CapUsedPercent = 90   # stop when dest drive reaches this used %
+    [int]$CapUsedPercent = 90
   )
-  # loop in small batches: move a few items each pass, re-check capacity
   $movedAny = $false
+  $iterations = 0
   while ($true) {
+    $iterations++
     $free = Get-FreePercent $DestDrive
     $used = 100 - $free
     if ($used -ge $CapUsedPercent) {
@@ -150,22 +152,60 @@ function Move-IntoDriveUntilCap {
       break
     }
     if (!(Test-Path $SourceDir)) { Write-Log "Source empty/missing: $SourceDir"; break }
-    # move a small batch each loop to stay responsive
-    $batch = Get-ChildItem -LiteralPath $SourceDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName } | Sort-Object LastWriteTime | Select-Object -First 50
+
+    $batch = Get-ChildItem -LiteralPath $SourceDir -Force -ErrorAction SilentlyContinue |
+             Where-Object { $_.Name -ne $IgnoreName } |
+             Sort-Object LastWriteTime |
+             Select-Object -First 50
     if (-not $batch -or $batch.Count -eq 0) { Write-Log "No more items in $SourceDir"; break }
+
     Ensure-Dir $DestDir
+
     foreach ($it in $batch) {
-      if ($DryRun) { Write-Log "[DryRun] Move '$($it.FullName)' -> '$DestDir'" }
-      else {
-        try { Move-Item -LiteralPath $it.FullName -Destination $DestDir -Force -ErrorAction Stop; Write-Log "Moved: '$($it.FullName)' -> '$DestDir'" }
-        catch { Write-Log "ERROR: Move '$($it.FullName)' -> '$DestDir' failed. $_" }
+      if ($DryRun) {
+        if ($it.PSIsContainer) {
+          $destRoot = Join-Path $DestDir $it.Name
+          try {
+            $files = Get-ChildItem -LiteralPath $it.FullName -File -Recurse -Force -ErrorAction Stop
+          } catch {
+            Write-Log "[DryRun] ERROR: Failed to enumerate files in '$($it.FullName)'. $_"
+            $files = @()
+          }
+          $totalFiles = $files.Count
+          $extList = ($files |
+            Select-Object -ExpandProperty Extension |
+            ForEach-Object { if ([string]::IsNullOrWhiteSpace($_)) { '(no ext)' } else { $_.ToLowerInvariant() } } |
+            Sort-Object -Unique) -join ', '
+          if ([string]::IsNullOrWhiteSpace($extList)) { $extList = '(none)' }
+
+          Write-Log "[DryRun] Dir -> '$($it.FullName)'  ==> DestRoot '$destRoot'"
+          Write-Log "[DryRun]   File types: $extList"
+          Write-Log "[DryRun]   Total files (recursive): $totalFiles"
+          if ($totalFiles -eq 0) { Write-Log "[DryRun]   (Empty directory will be moved as folder only)" }
+        } else {
+          $destPath = Join-Path $DestDir $it.Name
+          Write-Log "[DryRun] File -> '$($it.FullName)'  ==> '$destPath'"
+        }
+      } else {
+        try {
+          Move-Item -LiteralPath $it.FullName -Destination $DestDir -Force -ErrorAction Stop
+          Write-Log "Moved: '$($it.FullName)' -> '$DestDir'"
+        } catch {
+          Write-Log "ERROR: Move '$($it.FullName)' -> '$DestDir' failed. $_"
+        }
       }
       $movedAny = $true
     }
-    # loop to re-check capacity
+
+    # IMPORTANT: in DryRun nothing changes on disk, so bail after one batch to avoid infinite loops.
+    if ($DryRun) {
+      Write-Log "[DryRun] Completed one batch for $SourceDir -> $DestDir. Breaking to avoid infinite loop."
+      break
+    }
   }
   return $movedAny
 }
+
 
 #---------------------------- Main Logic ----------------------------
 Assert-Admin
@@ -187,7 +227,7 @@ Write-Log "E: free=$freeE% (used=$usedE%), F: free=$freeF% (used=$usedF%), D: fr
 
 # Trigger only when E is at/over 90% used
 if ($usedE -ge 90) {
-  Send-HA-Notification -Title $HA.Title -Message "E >= 90% used (E used=$usedE%). Starting balancing across F and D."
+  #Send-HA-Notification -Title $HA.Title -Message "E >= 90% used (E used=$usedE%). Starting balancing across F and D."
 
   # Build F destinations with same leaf names as E sources
   $FFrontDst = Join-Path $Paths.FRoot (Split-Path $Paths.EFrontSrc -Leaf)
@@ -200,9 +240,15 @@ if ($usedE -ge 90) {
     $m1 = Move-IntoDriveUntilCap -SourceDir $Paths.EFrontSrc -DestDir $FFrontDst -DestDrive 'F' -CapUsedPercent 90
     $m2 = Move-IntoDriveUntilCap -SourceDir $Paths.EBackSrc  -DestDir $FBackDst  -DestDrive 'F' -CapUsedPercent 90
 
+    if ($DryRun) {
+        Write-Log "[DryRun] 2 iterations of the dry run are done. Exiting Script."
+        Write-Log "---- StorageSweep complete ----"
+        exit
+    }
+
     # Re-evaluate E remaining; spill to D if any left
-    $remainingFront = Test-Path $Paths.EFrontSrc -and (Get-ChildItem -LiteralPath $Paths.EFrontSrc -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }).Count -gt 0
-    $remainingBack  = Test-Path $Paths.EBackSrc  -and (Get-ChildItem -LiteralPath $Paths.EBackSrc  -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }).Count -gt 0
+    $remainingFront = (Test-Path $Paths.EFrontSrc) -and (Get-ChildItem -LiteralPath $Paths.EFrontSrc -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }).Count -gt 0
+    $remainingBack  = (Test-Path $Paths.EBackSrc)  -and (Get-ChildItem -LiteralPath $Paths.EBackSrc  -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $IgnoreName }).Count -gt 0
 
     if ($remainingFront -or $remainingBack) {
       Write-Log "Spillover from E -> D (stop if D hits 90% used; wipe D targets and continue if needed)."
