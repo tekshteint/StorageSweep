@@ -227,7 +227,7 @@ Write-Log "E: free=$freeE% (used=$usedE%), F: free=$freeF% (used=$usedF%), D: fr
 
 # Trigger only when E is at/over 90% used
 if ($usedE -ge 90) {
-  #Send-HA-Notification -Title $HA.Title -Message "E >= 90% used (E used=$usedE%). Starting balancing across F and D."
+  Send-HA-Notification -Title $HA.Title -Message "E >= 90% used (E used=$usedE%). Starting balancing across F and D."
 
   # Build F destinations with same leaf names as E sources
   $FFrontDst = Join-Path $Paths.FRoot (Split-Path $Paths.EFrontSrc -Leaf)
