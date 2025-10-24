@@ -51,7 +51,7 @@ $Paths = @{
 $IgnoreName = 'DVRWorkDirectory'
 
 # Safety
-$DryRun = $false
+$DryRun = $true
 $AbortIfNotAdmin = $true
 
 # Home Assistant notify
@@ -226,16 +226,16 @@ function Move-IntoDriveUntilCap {
     [int]$CapUsedPercent = 90
   )
   $movedAny = $false
-  $iterations = 0
-  while ($true) {
-    $iterations++
+
+  :MoveLoop while ($true) {
     $free = Get-FreePercent $DestDrive
     $used = 100 - $free
     if ($used -ge $CapUsedPercent) {
       Write-Log "Dest $DestDrive`: is at/over $CapUsedPercent% used (free=$free%). Stop moving into $DestDir."
       break
     }
-    if (!(Test-Path $SourceDir)) { Write-Log "Source empty/missing: $SourceDir"; break }
+
+    if (!(Test-Path -LiteralPath $SourceDir)) { Write-Log "Source empty/missing: $SourceDir"; break }
 
     $batch = Get-ChildItem -LiteralPath $SourceDir -Force -ErrorAction SilentlyContinue |
              Where-Object { $_.Name -ne $IgnoreName } |
@@ -245,7 +245,15 @@ function Move-IntoDriveUntilCap {
 
     Ensure-Dir $DestDir
 
-        foreach ($it in $batch) {
+    foreach ($it in $batch) {
+
+      # Mid-batch capacity guard (works for any DestDrive, e.g., F:)
+      $freeNow = Get-FreePercent $DestDrive
+      $usedNow = 100 - $freeNow
+      if ($usedNow -ge $CapUsedPercent) {
+        Write-Log "Dest $DestDrive`: reached $usedNow% used mid-batch (cap=$CapUsedPercent%). Exiting move loop for $DestDir."
+        break MoveLoop
+      }
 
       # Skip date-named dirs for today or tomorrow
       if ($it.PSIsContainer -and (Should-SkipByDate -Item $it)) {
@@ -253,7 +261,7 @@ function Move-IntoDriveUntilCap {
         continue
       }
 
-      # Skip items still being written or locked
+      # Skip items still being written or very new/locked
       if (-not (Test-ItemReady -Item $it)) {
         Write-Log "SKIP (busy/new): '$($it.FullName)' (LastWrite=$($it.LastWriteTime))"
         continue
@@ -285,13 +293,13 @@ function Move-IntoDriveUntilCap {
       $movedAny = $true
     }
 
-
-    # IMPORTANT: in DryRun nothing changes on disk, so bail after one batch to avoid infinite loops.
+    # In DryRun nothing changes on disk-avoid looping forever
     if ($DryRun) {
       Write-Log "[DryRun] Completed one batch for $SourceDir -> $DestDir. Breaking to avoid infinite loop."
       break
     }
   }
+
   return $movedAny
 }
 
